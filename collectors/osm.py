@@ -66,7 +66,11 @@ def _build_overpass_query(bbox: tuple[float, float, float, float]) -> str:
 
 
 def _request_overpass(query: str) -> Optional[dict]:
-    """Try each configured Overpass endpoint until one succeeds."""
+    """
+    Try each configured Overpass endpoint, retrying the SAME endpoint a
+    few times with exponential backoff (Overpass often fails transiently
+    - 429/504/timeouts) before falling through to the next mirror.
+    """
     headers = {
         # Overpass etiquette requires an identifying User-Agent; the default
         # python-requests UA gets rejected (406) by the main instance.
@@ -74,24 +78,29 @@ def _request_overpass(query: str) -> Optional[dict]:
         "Accept": "application/json",
     }
 
-    for attempt, endpoint in enumerate(config.OVERPASS_ENDPOINTS):
-        if attempt > 0:
-            # Give the next mirror breathing room instead of hammering it
-            # immediately after the previous endpoint just failed.
+    for endpoint_index, endpoint in enumerate(config.OVERPASS_ENDPOINTS):
+        if endpoint_index > 0:
             time.sleep(config.OVERPASS_RETRY_DELAY_SECONDS)
-        try:
-            logger.info(f"Querying Overpass endpoint: {endpoint}")
-            response = requests.post(
-                endpoint,
-                data={"data": query},
-                headers=headers,
-                timeout=config.OVERPASS_REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            logger.warning(f"Overpass endpoint failed ({endpoint}): {exc}")
-            continue
+
+        for retry in range(config.OVERPASS_RETRIES_PER_ENDPOINT + 1):
+            if retry > 0:
+                backoff = config.OVERPASS_BACKOFF_BASE_SECONDS * (2 ** (retry - 1))
+                logger.info(f"Retrying {endpoint} in {backoff}s (attempt {retry + 1})")
+                time.sleep(backoff)
+            try:
+                logger.info(f"Querying Overpass endpoint: {endpoint}")
+                response = requests.post(
+                    endpoint,
+                    data={"data": query},
+                    headers=headers,
+                    timeout=config.OVERPASS_REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.RequestException as exc:
+                logger.warning(f"Overpass endpoint failed ({endpoint}): {exc}")
+                continue
+
     logger.error("All Overpass endpoints failed.")
     return None
 
@@ -134,6 +143,50 @@ def _element_to_business(element: dict, city_label: str) -> Optional[Business]:
         phone=tags.get("phone") or tags.get("contact:phone"),
         source="osm",
     )
+
+
+def _deduplicate(businesses: list[Business]) -> tuple[list[Business], int]:
+    """
+    Collapse duplicate businesses caused by the same real-world business
+    appearing as multiple OSM elements (node + way, or overlapping tile
+    edges). Key: normalized name + rounded coordinates, OR matching
+    website/phone if present — either signal is enough to call it a dupe.
+    Returns (deduplicated_list, number_removed).
+    """
+    seen_name_coord: set[tuple[str, Optional[float], Optional[float]]] = set()
+    seen_website: set[str] = set()
+    seen_phone: set[str] = set()
+
+    unique: list[Business] = []
+    removed = 0
+
+    for business in businesses:
+        name_key = business.name.strip().lower()
+        lat_key = round(business.latitude, 4) if business.latitude is not None else None
+        lon_key = round(business.longitude, 4) if business.longitude is not None else None
+        name_coord_key = (name_key, lat_key, lon_key)
+
+        website_key = business.website.strip().lower() if business.website else None
+        phone_key = "".join(ch for ch in business.phone if ch.isdigit()) if business.phone else None
+
+        is_duplicate = (
+            name_coord_key in seen_name_coord
+            or (website_key and website_key in seen_website)
+            or (phone_key and phone_key in seen_phone)
+        )
+
+        if is_duplicate:
+            removed += 1
+            continue
+
+        seen_name_coord.add(name_coord_key)
+        if website_key:
+            seen_website.add(website_key)
+        if phone_key:
+            seen_phone.add(phone_key)
+        unique.append(business)
+
+    return unique, removed
 
 
 def collect(geofence_key: str = config.ACTIVE_GEOFENCE) -> list[Business]:
@@ -180,8 +233,11 @@ def collect(geofence_key: str = config.ACTIVE_GEOFENCE) -> list[Business]:
         if i < len(tiles):
             time.sleep(config.OSM_TILE_DELAY_SECONDS)
 
+    deduped_businesses, duplicates_removed = _deduplicate(businesses)
+
     logger.info(
-        f"OSM collection complete: {len(businesses)} named businesses "
-        f"({skipped_unnamed} unnamed elements skipped across {len(tiles)} tiles)."
+        f"OSM collection complete: {len(deduped_businesses)} unique businesses "
+        f"({duplicates_removed} duplicates removed, {skipped_unnamed} unnamed "
+        f"elements skipped across {len(tiles)} tiles)."
     )
-    return businesses
+    return deduped_businesses

@@ -20,15 +20,18 @@ class Business:
     phone: Optional[str] = None
     source: str = "unknown"
 
-    # Enrichment fields — populated in a later stage. Left as None for now,
-    # defined here so the schema doesn't change shape when enrichment lands.
-    linkedin: Optional[str] = None
+    # Enrichment fields — populated in a later stage.
+    linkedin_url: Optional[str] = None
     emails: Optional[str] = None
     employees: Optional[str] = None
     dns_records: Optional[str] = None
     whois_data: Optional[str] = None
-    verified: Optional[bool] = None
     social_media: Optional[str] = None
+
+    # Verification/confidence — every collector sets a baseline; later
+    # sources (website confirmed, Google Places match, manual check) raise it.
+    verification_status: str = "OSM"
+    confidence_score: float = 0.40
 
     def to_dict(self) -> dict:
         return asdict(self)

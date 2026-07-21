@@ -32,11 +32,15 @@ ACTIVE_GEOFENCE: str = "dubai"
 # --- Overpass API (OpenStreetMap) -----------------------------------------
 OVERPASS_ENDPOINTS: list[str] = [
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",  # fallback mirror
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 OVERPASS_TIMEOUT_SECONDS: int = 180
 OVERPASS_REQUEST_TIMEOUT: int = 120  # HTTP client timeout, seconds
 OVERPASS_RETRY_DELAY_SECONDS: int = 5  # pause before trying the next mirror
+OVERPASS_RETRIES_PER_ENDPOINT: int = 2  # retry attempts on the SAME endpoint before moving on
+OVERPASS_BACKOFF_BASE_SECONDS: int = 4  # exponential backoff base between same-endpoint retries
 
 # Dubai's full bbox times out as a single query on public Overpass servers,
 # so it's split into a grid of smaller tiles queried sequentially.
@@ -53,6 +57,16 @@ LOG_DIR: Path = ROOT_DIR / "logs"
 LOG_LEVEL: str = "INFO"
 LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
+# --- LinkedIn enrichment -------------------------------------------------
+# Leave LINKEDIN_SEARCH_API_KEY empty to skip enrichment entirely (safe
+# default). Fill it in once you've signed up for a real search API - Bing
+# Web Search API is what enrichers/linkedin.py is wired for by default.
+LINKEDIN_SEARCH_API_KEY: str = ""
+LINKEDIN_SEARCH_API_URL: str = "https://api.bing.microsoft.com/v7.0/search"
+LINKEDIN_SEARCH_TIMEOUT_SECONDS: int = 15
+LINKEDIN_SEARCH_API_KEY: str = ""
+LINKEDIN_SEARCH_API_URL: str = "https://api.bing.microsoft.com/v7.0/search"
+LINKEDIN_SEARCH_TIMEOUT_SECONDS: int = 15
 # --- Output -------------------------------------------------------------
 EXCEL_ENGINE: str = "openpyxl"
 
