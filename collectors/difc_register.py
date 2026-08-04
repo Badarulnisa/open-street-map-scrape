@@ -8,10 +8,20 @@ Confirmed via live DevTools inspection and manual endpoint testing
 - offset-based pagination confirmed real (non-overlapping pages at
   offset 0/10/20/30)
 - no hard ceiling near Salesforce's typical OFFSET<=2000 governor limit
-  (offset=1990 returned a normal, fresh page)
-- end-of-dataset behavior confirmed: past the real end, the API returns
+  (offset=1990 returned a normal, fresh page -- confirmed live)
+- end-of-dataset behavior confirmed: offset=8830 returned
   {"Data": null, "IsSuccess": true, "StatusCode": 200} -- NOT an empty
-  companyList and NOT an error. This is handled explicitly below.
+  companyList and NOT an error. Confirmed live, consistent with DIFC's
+  publicly reported ~8,844 registered companies.
+- Requires a requests.Session() that first GETs the public register page
+  to acquire a guest-user session cookie -- a raw POST with no prior
+  session returns 500.
+- CRITICAL: the real browser request sends Content-Type as
+  "text/plain;charset=UTF-8", NOT "application/json", even though the
+  body is JSON text. Salesforce's Apex REST handler appears to manually
+  parse the raw body rather than negotiating standard JSON content-type,
+  and rejects requests sent with "application/json" (confirmed: this was
+  the actual root cause of persistent 500 errors before this fix).
 
 NOTE: No explicit reproduction/scraping prohibition was found on this
 page (unlike DMCC's directory, which explicitly forbids it). This is a
@@ -20,6 +30,7 @@ DFSA). Confirm DIFC's own Terms of Use independently before running this
 at full volume in a production context -- this collector was built after
 confirming the technical mechanism only, not after a full legal review.
 """
+import json as json_lib
 import time
 from typing import Optional
 
@@ -31,15 +42,46 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+DIFC_REGISTER_PAGE = "https://www.difc.com/business/public-register"
 DIFC_ENDPOINT = "https://www.difc.com/api/handleRequest"
-PAGE_SIZE = 10  # confirmed empirically -- companyList returns exactly 10 per call
+PAGE_SIZE = 10
 REQUEST_TIMEOUT_SECONDS = 15
-REQUEST_DELAY_SECONDS = 1.5  # be polite -- no documented rate limit, so we self-impose one
+REQUEST_DELAY_SECONDS = 1.5
 MAX_RETRIES = 3
-MAX_PAGES = 1000  # safety cap -- DIFC reports ~8,844 companies / 10 per page ~= 885 pages
+MAX_PAGES = 1000
+
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+_session = requests.Session()
+_session_initialized = False
+
+
+def _ensure_session() -> None:
+    """Salesforce Experience Cloud issues a guest-user session cookie on
+    page load. The API rejects POST requests without it. This does one
+    GET to the public register page first, to pick up that cookie, before
+    any POST calls are made. Runs only once per process."""
+    global _session_initialized
+    if _session_initialized:
+        return
+    try:
+        _session.get(
+            DIFC_REGISTER_PAGE,
+            headers={"User-Agent": _BROWSER_USER_AGENT},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        _session_initialized = True
+        logger.info("DIFC register: session initialized (guest cookie acquired).")
+    except requests.RequestException as exc:
+        logger.warning(f"DIFC register: failed to initialize session: {exc}")
 
 
 def _fetch_page(offset: int) -> Optional[list[dict]]:
+    _ensure_session()
+
     payload = {
         "name": "",
         "licenseType": "",
@@ -49,16 +91,21 @@ def _fetch_page(offset: int) -> Optional[list[dict]]:
         "slug": "/CRM/public-register",
         "method": "POST",
     }
+    # Content-Type must be exactly "text/plain;charset=UTF-8" to match what
+    # the real browser sends -- "application/json" causes a 500 from
+    # Salesforce's Apex REST handler. See module docstring.
     headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (compatible; OSINT-research-bot/1.0)",
+        "Content-Type": "text/plain;charset=UTF-8",
+        "Accept": "*/*",
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Referer": DIFC_REGISTER_PAGE,
     }
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(
+            resp = _session.post(
                 DIFC_ENDPOINT,
-                json=payload,
+                data=json_lib.dumps(payload),
                 headers=headers,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
@@ -75,8 +122,7 @@ def _fetch_page(offset: int) -> Optional[list[dict]]:
             result_data = data.get("Data")
             if result_data is None:
                 # Confirmed behavior: end of dataset returns Data:null with
-                # IsSuccess:true, NOT an empty list and NOT an error. This is
-                # the legitimate "we've reached the end" signal, not a failure.
+                # IsSuccess:true, NOT an empty list and NOT an error.
                 logger.info(
                     f"DIFC register: Data=null at offset {offset} -- "
                     f"reached end of register."
@@ -127,7 +173,7 @@ def collect(geofence_key: str = "dubai") -> list[Business]:
                     website=company.get("Website"),
                     source="difc_register",
                     verification_status="DIFC",
-                    confidence_score=0.9,  # official regulatory register, highest-confidence source found
+                    confidence_score=0.9,
                     registration_status=(
                         "registered" if company.get("ROC_Status__c") == "Active" else "deregistered"
                     ),
