@@ -47,11 +47,14 @@ Overpass's public servers gateway-time-out on large single-city queries, so the 
   <img src="docs/screenshots/tile-grid.png" alt="Tile grid over Dubai" width="600"/>
 </p>
 
+---
+  
 <p align="center">
   <img src="docs/screenshots/overpass-live-map.png" alt="Raw Overpass query results plotted live" width="750"/>
   <br/>
   <sub>Raw Overpass query results for a section of Dubai — before deduplication and filtering. Captured via <a href="https://overpass-turbo.eu">Overpass Turbo</a>.</sub>
 </p>
+
 
 | Step | What happens |
 |---|---|
